@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>16x16 Board Game</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family: system-ui; }
+  canvas { display:block; margin:20px auto; background:#fff; border-radius:12px; }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="720" height="720"></canvas>
+
+<script>
+/* ================= 基本 ================= */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const SIZE = 16;
+const CELL = 40;
+const W = canvas.width;
+const H = canvas.height;
+
+/* ================= サイコロ ================= */
+let diceView = {
+  atk: { value: 1 },
+  def: { value: 1 },
+  until: 0,
+  rolling: false
+};
+
+function rollD6(){
+  return Math.floor(Math.random()*6)+1;
+}
+
+/* ================= 地形 ================= */
+const terrain = Array.from({length: SIZE}, (_,y)=>
+  Array.from({length: SIZE}, (_,x)=>{
+    if (y===7 || y===8) return "river";
+    if ((x<2&&y<2)||(x>13&&y<2)||(x<2&&y>13)||(x>13&&y>13)) return "forest";
+    return "plain";
+  })
+);
+terrain[7][8] = "bridge";
+terrain[8][8] = "bridge";
+
+/* ================= キャラ ================= */
+const units = [
+  // BLUE
+  {id:1,team:"B",name:"犬勇者",role:"hero",x:4,y:2,hp:7,ATK:2,DEF:3,MOV:3},
+  {id:2,team:"B",name:"きりん盾兵",role:"tank",x:6,y:2,hp:8,ATK:1,DEF:5,MOV:3},
+  {id:3,team:"B",name:"龍弓兵",role:"archer",x:8,y:2,hp:6,ATK:4,DEF:1,MOV:2,rangeLen:4},
+  {id:4,team:"B",name:"牛魔法使い",role:"mage",x:5,y:3,hp:8,ATK:2,DEF:3,MOV:2},
+  {id:5,team:"B",name:"うま斧兵",role:"axe",x:7,y:3,hp:7,ATK:3,DEF:1,MOV:4},
+
+  // RED
+  {id:6,team:"R",name:"うさぎ勇者",role:"hero",x:4,y:13,hp:7,ATK:2,DEF:2,MOV:4},
+  {id:7,team:"R",name:"ぶた盾兵",role:"tank",x:6,y:13,hp:9,ATK:1,DEF:5,MOV:2},
+  {id:8,team:"R",name:"へび弓兵",role:"archer",x:8,y:13,hp:6,ATK:3,DEF:1,MOV:3,rangeLen:3},
+  {id:9,team:"R",name:"ぞう魔法使い",role:"mage",x:5,y:12,hp:8,ATK:3,DEF:2,MOV:2},
+  {id:10,team:"R",name:"らいおん斧兵",role:"axe",x:7,y:12,hp:7,ATK:4,DEF:1,MOV:3},
+];
+
+/* ================= 状態 ================= */
+let turn = "R";
+let phase = "move";
+let selected = null;
+let highlights = [];
+let pulse = 0;
+
+/* ================= 補助 ================= */
+function unitAt(x,y){
+  return units.find(u=>u.hp>0 && u.x===x && u.y===y);
+}
+function inBoard(x,y){
+  return x>=0 && y>=0 && x<SIZE && y<SIZE;
+}
+function walkable(x,y){
+  if (!inBoard(x,y)) return false;
+  if (terrain[y][x]==="river") return false;
+  if (unitAt(x,y)) return false;
+  return true;
+}
+
+/* ================= 移動 ================= */
+function calcMove(u){
+  highlights=[];
+  for(let dy=-u.MOV;dy<=u.MOV;dy++){
+    for(let dx=-u.MOV;dx<=u.MOV;dx++){
+      if(Math.abs(dx)+Math.abs(dy)<=u.MOV){
+        const nx=u.x+dx, ny=u.y+dy;
+        if(walkable(nx,ny)) highlights.push({x:nx,y:ny,type:"move"});
+      }
+    }
+  }
+}
+
+/* ================= 攻撃範囲 ================= */
+function calcAttack(u){
+  highlights=[];
+  const dir = (u.team==="R")?-1:1;
+  const add=(x,y)=>{if(inBoard(x,y)) highlights.push({x,y,type:"attack"});};
+
+  if(u.role==="hero"){
+    add(u.x,u.y-1);add(u.x+1,u.y);add(u.x-1,u.y);add(u.x,u.y+1);
+  }
+  if(u.role==="tank"){
+    add(u.x,u.y+dir);add(u.x-1,u.y);add(u.x+1,u.y);
+  }
+  if(u.role==="axe"){
+    add(u.x-1,u.y+dir);add(u.x,u.y+dir);add(u.x+1,u.y+dir);
+  }
+  if(u.role==="mage"){
+    add(u.x,u.y-1);add(u.x+1,u.y);add(u.x-1,u.y);add(u.x,u.y+1);
+  }
+  if(u.role==="archer"){
+    const len=u.rangeLen||3;
+    for(let i=1;i<=len;i++){
+      const y=u.y+dir*i;
+      if(!inBoard(u.x,y)) break;
+      add(u.x,y);
+    }
+  }
+}
+
+/* ================= 攻撃処理（2サイコロ） ================= */
+function attack(attacker, defender){
+  const rA = rollD6();
+  const rD = rollD6();
+
+  diceView.rolling = true;
+  diceView.until = Date.now()+700;
+  diceView.atk.value = rA;
+  diceView.def.value = rD;
+
+  let dmg = (rA+attacker.ATK) - (rD+defender.DEF);
+  if(dmg<1) dmg=1;
+  defender.hp = Math.max(0, defender.hp-dmg);
+}
+
+/* ================= クリック ================= */
+canvas.onclick = e=>{
+  const r=canvas.getBoundingClientRect();
+  const x=Math.floor((e.clientX-r.left)/CELL);
+  const y=Math.floor((e.clientY-r.top)/CELL);
+
+  const hit=highlights.find(h=>h.x===x&&h.y===y);
+  if(selected && hit){
+    if(phase==="move"){
+      selected.x=x;selected.y=y;
+      phase="attack";calcAttack(selected);return;
+    }
+    if(phase==="attack"){
+      const t=unitAt(x,y);
+      if(t && t.team!==selected.team){
+        attack(selected,t);
+        selected=null;highlights=[];phase="move";
+        turn=(turn==="R")?"B":"R";
+        return;
+      }
+    }
+  }
+
+  const u=unitAt(x,y);
+  if(u && u.team===turn){
+    selected=u;phase="move";calcMove(u);
+  }
+};
+
+/* ================= 描画 ================= */
+function draw(){
+  pulse+=0.05;
+  ctx.clearRect(0,0,W,H);
+
+  for(let y=0;y<SIZE;y++)for(let x=0;x<SIZE;x++){
+    ctx.fillStyle=
+      terrain[y][x]==="plain"?"#cde8b5":
+      terrain[y][x]==="forest"?"#4f7f3a":
+      terrain[y][x]==="bridge"?"#c9a46a":"#2f93d1";
+    ctx.fillRect(x*CELL,y*CELL,CELL,CELL);
+    ctx.strokeRect(x*CELL,y*CELL,CELL,CELL);
+  }
+
+  highlights.forEach(h=>{
+    ctx.fillStyle=h.type==="move"
+      ?`rgba(34,197,94,${0.25+Math.sin(pulse)*0.1})`
+      :`rgba(239,68,68,${0.25+Math.sin(pulse)*0.1})`;
+    ctx.fillRect(h.x*CELL,h.y*CELL,CELL,CELL);
+  });
+
+  units.forEach(u=>{
+    if(u.hp<=0)return;
+    ctx.fillStyle=u.team==="R"?"#ef4444":"#3b82f6";
+    ctx.beginPath();
+    ctx.arc(u.x*CELL+20,u.y*CELL+20,14,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle="#000";
+    ctx.fillText(u.hp,u.x*CELL+20,u.y*CELL+20);
+  });
+
+  // サイコロ
+  if(diceView.rolling || Date.now()<diceView.until){
+    if(Date.now()<diceView.until){
+      diceView.atk.value=rollD6();
+      diceView.def.value=rollD6();
+    }else diceView.rolling=false;
+
+    const size=70;
+    const y=H/2-size/2;
+    const x1=W/2-size-20;
+    const x2=W/2+20;
+
+    ctx.fillStyle="#fff";
+    ctx.strokeStyle="#b91c1c";
+    ctx.lineWidth=4;
+    ctx.fillRect(x1,y,size,size);
+    ctx.strokeRect(x1,y,size,size);
+    ctx.fillStyle="#b91c1c";
+    ctx.font="bold 32px system-ui";
+    ctx.fillText(diceView.atk.value,x1+size/2,y+size/2);
+
+    ctx.strokeStyle="#1e3a8a";
+    ctx.fillStyle="#fff";
+    ctx.fillRect(x2,y,size,size);
+    ctx.strokeRect(x2,y,size,size);
+    ctx.fillStyle="#1e3a8a";
+    ctx.fillText(diceView.def.value,x2+size/2,y+size/2);
+  }
+
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
